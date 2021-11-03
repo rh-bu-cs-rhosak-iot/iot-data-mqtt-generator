@@ -25,6 +25,11 @@ public class Generator {
 
     static final Logger log = LoggerFactory.getLogger(Generator.class);
 
+    private static final String AVAILABLE = "available";
+    private static final String OCCUPIED = "occupied";
+    private static final String NOT_AVAILABLE = "NA";
+    private static final String OUT_OF_ORDER = "out-of-order";
+
     @ConfigProperty(name = "interval.milliseconds")
     int intervalMilliSeconds;
 
@@ -37,8 +42,25 @@ public class Generator {
     @Outgoing("meters")
     public Multi<Message<String>> generate() {
         return Multi.createFrom().ticks().every(Duration.ofMillis(intervalMilliSeconds)).onOverflow().drop()
-                .map(tick -> Message.of(meters.get(r.nextInt(meters.size())).copy()
-                        .put("timestamp", Instant.now().getEpochSecond()).put("status", stateWeights.next()).encode()));
+                .map(tick -> {
+                    JsonObject meter = meters.get(r.nextInt(meters.size()));
+                    String previous = meter.getString("status");
+                    String next = nextStatus(previous);
+                    meter.put("status", next);
+                    return Message.of(new JsonObject().put("id", meter.getString("id")).put("prev", previous)
+                            .put("status", next).put("timestamp", Instant.now().getEpochSecond()).encode());
+                });
+    }
+
+    private String nextStatus(String status) {
+        String next = stateWeights.next();
+        if (status.equals(NOT_AVAILABLE) || status.equals(OUT_OF_ORDER) || next.equals(OUT_OF_ORDER)) {
+            return next;
+        } else if (status.equals(AVAILABLE)) {
+            return OCCUPIED;
+        } else {
+            return AVAILABLE;
+        }
     }
 
     @PostConstruct
@@ -47,13 +69,13 @@ public class Generator {
         InputStream is = this.getClass().getResourceAsStream("/data/meter_info.csv");
         BufferedReader reader = new BufferedReader(new InputStreamReader(is));
         meters = reader.lines().skip(1).map(csv::parse).filter(Objects::nonNull)
-                .map(f -> new JsonObject().put("uuid",f.get(0)).put("address",f.get(1))
-                        .put("latitude", Double.parseDouble(f.get(2))).put("longitude", Double.parseDouble(f.get(3))))
+                .map(f -> new JsonObject().put("id",f.get(0)).put("address",f.get(1))
+                        .put("latitude", Double.parseDouble(f.get(2))).put("longitude", Double.parseDouble(f.get(3)))
+                        .put("status", NOT_AVAILABLE))
                 .collect(Collectors.toList());
         stateWeights = new WeightedCollection<>();
-        stateWeights.add(55, "occupied");
-        stateWeights.add(25, "available");
-        stateWeights.add(10, "unknown");
-        stateWeights.add(10, "out-of-service");
+        stateWeights.add(55, OCCUPIED);
+        stateWeights.add(50, AVAILABLE);
+        stateWeights.add(5, OUT_OF_ORDER);
     }
 }
